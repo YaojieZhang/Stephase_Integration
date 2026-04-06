@@ -1,0 +1,72 @@
+{
+  "_comment": "=== STELLA x scPhase Integration Centralized Configuration ===",
+
+  "path_params": {
+    "data_h5ad_file": "/data/wuqinhua/phase_1r/AD/AD_NatureNeuro_ADNC.h5ad",
+    "master_pickle_file": "",
+    "RESULTS_DIR": "/data/wuqinhua/stella_scphase/AD/",
+    "LOGNAME": "training_stella_scphase_AD.log",
+    "MODEL_NAME": "STELLA_scPhase_AD"
+  },
+
+  "data_params": {
+    "sample_col": "sample_id",
+    "label_col": "phenotype",
+    "batch_col": "batch"
+  },
+
+  "run_params": {
+    "seed": 3407,
+    "skip_groups": [],
+    "device": "cuda:0",
+    "task_type": "classification",
+    "num_folds": 5
+  },
+
+  "llm_params": {
+    "pretrained_model_path": "/data/wuqinhua/stella_pretrained/checkpoint-xxxxx",
+    "stella_src_path": "/path/to/scRNA-LLM/src",
+    "gene2id_path": "/path/to/scRNA-LLM/src/stella/gene2id.pkl",
+    "bin_boundary_path": "/path/to/scRNA-LLM/src/stella/bin_100.pkl",
+    "input_gene_expr_type": "bin",
+    "llm_hidden_size": 512,
+    "freeze_llm": true,
+    "enable_gradient_checkpointing": true,
+    "llm_max_seq_len": 4096,
+    "chunk_size": 256,
+    "do_normalize": true,
+    "do_qc": false
+  },
+
+  "mil_params": {
+    "max_instances": 1024,
+    "mil_hidden_dim": 256,
+    "attention_type": "linformer",
+    "num_heads": 8,
+    "linformer_k": 128,
+    "linformer_dropout": 0.3,
+    "use_moe": true,
+    "moe_num_experts": 8,
+    "moe_dropout": 0.2,
+    "instance_dropout_rate": 0.2,
+    "classifier_dims": [128, 64],
+    "classifier_dropout_rates": [0.1, 0.1],
+    "n_classes": 4,
+    "use_domain_adaptation": true
+  },
+
+  "training_params": {
+    "epochs": 150,
+    "batch_size": 1,
+    "num_workers": 4,
+    "early_stopping_patience": 20,
+    "val_size": 0.1,
+    "llm_lr": 1e-5,
+    "mil_lr": 1e-3,
+    "weight_decay": 1e-4,
+    "betas": [0.9, 0.999],
+    "clip_grad_norm": 1.0,
+    "warmup_epochs": 10,
+    "use_amp": true
+  }
+}
