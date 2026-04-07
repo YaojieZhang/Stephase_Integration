@@ -495,6 +495,16 @@ class StellaScPhaseDataset(Dataset):
             # ---- Tokenize from raw data ----
             sample_data = self.data_list[index]  # csr_matrix [num_cells, num_genes]
 
+            # ==== 新增：硬性下采样逻辑 (防 FLOPs 爆炸) ====
+            num_cells = sample_data.shape[0]
+            max_instances = self.tokenizer.max_instances # 需在 tokenizer 初始化时传入
+            if num_cells > max_instances:
+                # 随机无放回采样 1024 个细胞
+                sampled_indices = np.random.choice(num_cells, max_instances, replace=False)
+                # 排序以保持稀疏矩阵在内存中的连续性，加速运算
+                sampled_indices = np.sort(sampled_indices)
+                sample_data = sample_data[sampled_indices]
+            
             gene_sym, gene_expr, attn_mask = self.tokenizer.tokenize_sample(
                 sample_data, self.gene_names
             )
