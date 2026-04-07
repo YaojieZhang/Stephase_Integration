@@ -509,9 +509,12 @@ def train_and_evaluate_fold(
 
                     # ---- Compute disease loss ----
                     # disease_out: [n_classes], labels: [1] → unsqueeze for CE
-                    disease_loss = disease_criterion(
-                        disease_out.unsqueeze(0), labels
-                    )
+                    if task_type == "classification":
+                        disease_loss = disease_criterion(disease_out.unsqueeze(0), labels)
+                    else:
+                        # 强制拉平为 1D 张量，避免标量和二维张量的 Broadcasting
+                        disease_loss = disease_criterion(disease_out.view(-1), labels.view(-1))
+                    
                     loss = disease_loss
 
                     # ---- Compute domain adaptation loss (optional) ----
@@ -643,8 +646,8 @@ def train_and_evaluate_fold(
                         val_probs.append(probs.cpu().numpy())
                         val_true.append(labels.cpu().numpy())
                     else:
-                        val_preds.append(disease_out.float().cpu().numpy())
-                        val_true.append(labels.squeeze().cpu().numpy())
+                        val_preds.append(disease_out.detach().float().cpu().item())
+                        val_true.append(labels.detach().float().cpu().item())
 
                 except RuntimeError as e:
                     if "out of memory" in str(e):
@@ -809,11 +812,11 @@ def run_cv_experiment(config_path: str):
 
     # ---- 4.2: Environment checks ----
     if not torch.cuda.is_available():
-        logger.warning("⚠️  CUDA NOT available. Forcing CPU mode (this will be very slow).")
+        logger.warning("CUDA NOT available. Forcing CPU mode (this will be very slow).")
         config["run_params"]["device"] = "cpu"
     else:
         gpu_name = torch.cuda.get_device_name(0)
-        gpu_mem = torch.cuda.get_device_properties(0).total_mem / (1024**3)
+        gpu_mem = torch.cuda.get_device_properties(0).total_memory / (1024**3)
         logger.info(f"GPU: {gpu_name} | VRAM: {gpu_mem:.1f} GB")
 
     set_seed(config["run_params"]["seed"])
@@ -973,8 +976,8 @@ Examples:
     parser.add_argument(
         "--config",
         type=str,
-        default="./config_integration.json",
-        help="Path to the JSON configuration file (default: ./config_integration.json)",
+        default="./StePhase/config_integration.json",
+        help="Path to the JSON configuration file (default: ./StePhase/config_integration.json)",
     )
     args = parser.parse_args()
 
