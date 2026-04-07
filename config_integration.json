@@ -2,11 +2,11 @@
   "_comment": "=== STELLA x scPhase Integration Centralized Configuration ===",
 
   "path_params": {
-    "data_h5ad_file": "/data/wuqinhua/phase_1r/AD/AD_NatureNeuro_ADNC.h5ad",
-    "master_pickle_file": "",
-    "RESULTS_DIR": "/data/wuqinhua/stella_scphase/AD/",
-    "LOGNAME": "training_stella_scphase_AD.log",
-    "MODEL_NAME": "STELLA_scPhase_AD"
+    "data_h5ad_file": "/data/home/zhangyaojie/StePhase/data/NSCLC/NSCLC.h5ad",
+    "master_pickle_file": "/data/home/zhangyaojie/StePhase/data/NSCLC/NSCLC.pkl",
+    "RESULTS_DIR": "/data/home/zhangyaojie/StePhase/results/NSCLC",
+    "LOGNAME": "training_stephase_NSCLC.log",
+    "MODEL_NAME": "StePhase_NSCLC"
   },
 
   "data_params": {
@@ -24,17 +24,17 @@
   },
 
   "llm_params": {
-    "pretrained_model_path": "/data/wuqinhua/stella_pretrained/checkpoint-xxxxx",
-    "stella_src_path": "/path/to/scRNA-LLM/src",
-    "gene2id_path": "/path/to/scRNA-LLM/src/stella/gene2id.pkl",
-    "bin_boundary_path": "/path/to/scRNA-LLM/src/stella/bin_100.pkl",
+    "pretrained_model_path": "/data/home/zhangyaojie/Stella/scRNA_LLM/pretrained_models/Human/B100_L2048",
+    "stella_src_path": "/data/home/zhangyaojie/Stella/scRNA_LLM/src",
+    "gene2id_path": "/data/home/zhangyaojie/Stella/scRNA_LLM/src/stella/gene2id.pkl",
+    "bin_boundary_path": "/data/home/zhangyaojie/Stella/scRNA_LLM/src/stella/bin_100.pkl",
     "input_gene_expr_type": "bin",
     "llm_hidden_size": 512,
     "freeze_llm": true,
     "enable_gradient_checkpointing": true,
     "llm_max_seq_len": 4096,
     "chunk_size": 256,
-    "do_normalize": true,
+    "do_normalize": false,
     "do_qc": false
   },
 
@@ -57,10 +57,10 @@
 
   "training_params": {
     "epochs": 150,
-    "batch_size": 1,
+    "batch_size": 1, 
     "num_workers": 4,
-    "early_stopping_patience": 20,
-    "val_size": 0.1,
+    "early_stopping_patience": 15,
+    "val_size": 0.15,
     "llm_lr": 1e-5,
     "mil_lr": 1e-3,
     "weight_decay": 1e-4,
