@@ -23,7 +23,7 @@ import logging
 import random
 import numpy as np
 import scanpy as sc
-import scipy.sparse
+import scipy.sparse as sp
 import torch
 from tqdm import tqdm
 from pathlib import Path
@@ -263,9 +263,11 @@ class StellaInlineTokenizer:
                 continue
 
             # Truncate to max_length
-            if len(nonzero_indices) > self.max_length:
+            if len(nonzero_indices) > self.max_length: 
+                # Randomly sample genes to fit max_length (could also take top-k by expression, but random is simpler)
                 nonzero_indices = np.random.choice(nonzero_indices, self.max_length, replace=False)
-                nonzero_indices = np.sort(nonzero_indices)
+                nonzero_indices = np.sort(nonzero_indices) # 保持顺序有利于内存连续读取
+                
 
             # Gene symbol IDs for this cell's expressed genes
             cell_gene_sym = gene_symbol_ids_full[nonzero_indices]
@@ -461,6 +463,7 @@ class StellaScPhaseDataset(Dataset):
             sample_ids:   List of sample ID strings.
             gene_names:   Array of gene name strings (columns of data_list matrices).
             tokenizer:    StellaInlineTokenizer instance.
+            max_instances: Maximum number of cells to process per patient (to prevent FLOPs explosion).
         """
         super().__init__()
         self.data_list = data_list
@@ -469,6 +472,7 @@ class StellaScPhaseDataset(Dataset):
         self.sample_ids = sample_ids
         self.gene_names = gene_names
         self.tokenizer = tokenizer
+        self.max_instances = getattr(tokenizer, 'max_instances', 10000)
 
         # Cache for tokenized results to avoid re-tokenizing the same sample
         # WARNING: This can consume significant memory for large datasets.
@@ -495,16 +499,16 @@ class StellaScPhaseDataset(Dataset):
             # ---- Tokenize from raw data ----
             sample_data = self.data_list[index]  # csr_matrix [num_cells, num_genes]
 
-            # ==== 新增：硬性下采样逻辑 (防 FLOPs 爆炸) ====
+            # ==== 硬性下采样逻辑 (防 FLOPs 爆炸) ====
             num_cells = sample_data.shape[0]
-            max_instances = self.tokenizer.max_instances # 需在 tokenizer 初始化时传入
+            max_instances = self.max_instances
             if num_cells > max_instances:
                 # 随机无放回采样 1024 个细胞
                 sampled_indices = np.random.choice(num_cells, max_instances, replace=False)
                 # 排序以保持稀疏矩阵在内存中的连续性，加速运算
                 sampled_indices = np.sort(sampled_indices)
                 sample_data = sample_data[sampled_indices]
-            
+
             gene_sym, gene_expr, attn_mask = self.tokenizer.tokenize_sample(
                 sample_data, self.gene_names
             )
@@ -647,7 +651,9 @@ def create_tokenizer_from_config(config: dict) -> StellaInlineTokenizer:
         bin_boundary_path=llm_cfg['bin_boundary_path'],
         input_gene_expr_type=llm_cfg['input_gene_expr_type'],
         max_length=llm_cfg.get('llm_max_seq_len', 4096),
-        do_normalize=llm_cfg.get('do_normalize', True),
+        do_normalize=llm_cfg.get('do_normalize', False),
         do_qc=llm_cfg.get('do_qc', False),
     )
+    tokenizer.max_instances = config["mil_params"].get("max_instances", 10000)
+
     return tokenizer
