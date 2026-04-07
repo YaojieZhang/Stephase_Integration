@@ -28,7 +28,7 @@
 #   Optional — Domain Adaptation:
 #       bag_features → GRL → domain_output [num_domains]
 # ==============================================================================
-
+import os
 import sys
 import math
 import logging
@@ -39,6 +39,10 @@ from typing import Optional, Tuple, Dict, Any
 
 logger = logging.getLogger(__name__)
 
+# 获取当前文件的上一级目录 (/data/home/zhangyaojie) 并加入到 sys.path
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+if PROJECT_ROOT not in sys.path:
+    sys.path.append(PROJECT_ROOT)
 
 # ==============================================================================
 # Section 0: Import scPhase MIL components
@@ -76,8 +80,8 @@ def _import_stella(stella_src_path: str):
         sys.path.insert(0, stella_src_path)
         logger.info(f"[_import_stella] Injected '{stella_src_path}' into sys.path.")
 
-    from stella.models.modeling_stella import STELLAModel
-    from stella.models.configuration_stella import STELLAConfig
+    from Stella.scRNA_LLM.src.stella.models.modeling_stella import STELLAModel
+    from Stella.scRNA_LLM.src.stella.models.configuration_stella import STELLAConfig
 
     return STELLAModel, STELLAConfig
 
@@ -155,7 +159,7 @@ class SCMIL_STELLA_AttnMoE(nn.Module):
         # The Linformer projects K and V to a fixed low-rank dimension,
         # reducing attention complexity from O(n²) to O(n·k).
         hidden_dim = self.mil_hidden_dim
-        
+
         if self.attention_type == 'linformer':
             self.num_heads = mil_cfg.get('num_heads', 8)
             self.head_dim = hidden_dim // self.num_heads
@@ -165,7 +169,6 @@ class SCMIL_STELLA_AttnMoE(nn.Module):
             self.v_proj = nn.Linear(hidden_dim, hidden_dim)
             self.out_proj = nn.Linear(hidden_dim, hidden_dim)
             self.attn_dropout = nn.Dropout(mil_cfg.get('linformer_dropout', 0.3))   
-
             self.linformer_k = mil_cfg.get('linformer_k', 128)
             # Project sequence dimension from up to max_instances to linformer_k
             # Using 10000 as the max seq_len to match original scPhase design
@@ -227,6 +230,7 @@ class SCMIL_STELLA_AttnMoE(nn.Module):
         # ---- Initialize MIL-side weights (STELLA weights are pre-trained) ----
         # Only initialize the non-STELLA components
         initialize_weights(self.projector)
+
         if self.attention_type == 'linformer':
             initialize_weights(self.q_proj)
             initialize_weights(self.k_proj)
@@ -236,7 +240,7 @@ class SCMIL_STELLA_AttnMoE(nn.Module):
             initialize_weights(self.F_proj)
             initialize_weights(self.norm1)
             initialize_weights(self.norm2)
-            
+
         initialize_weights(self.mil_aggregator)
         initialize_weights(self.classifier)
         if self.use_domain_adaptation:
@@ -249,6 +253,18 @@ class SCMIL_STELLA_AttnMoE(nn.Module):
             f"use_moe={self.use_moe}, n_classes={n_classes}, num_domains={num_domains}"
         )
 
+    def train(self, mode: bool = True):
+        """
+        Override train() to prevent the "Pseudo-Freezing" trap.
+        If freeze_llm is True, we must force the stella_encoder into eval() mode,
+        otherwise its internal Dropout layers will still inject random noise during
+        the MIL training, causing unstable embeddings.
+        """
+        super(SCMIL_STELLA_AttnMoE, self).train(mode)
+        if hasattr(self, 'freeze_llm') and self.freeze_llm:
+            self.stella_encoder.eval()
+        return self
+    
     # ==================================================================
     # Forward Phase — VRAM Defense Mechanism
     # ==================================================================
@@ -371,16 +387,20 @@ class SCMIL_STELLA_AttnMoE(nn.Module):
         # Expand mask [chunk_size, seq_len] → [chunk_size, seq_len, 1] for broadcasting
         mask_expanded = attention_mask.unsqueeze(-1).to(hidden_states.dtype)
 
+        # 强制转换为 float32 计算 sum，防溢出
+        hidden_states_f32 = hidden_states.to(torch.float32)
+        mask_expanded_f32 = mask_expanded.to(torch.float32)
+
         # Sum over sequence dimension, weighted by mask
-        sum_embeddings = (hidden_states * mask_expanded).sum(dim=1)
+        sum_embeddings = (hidden_states_f32 * mask_expanded_f32).sum(dim=1)
         # [chunk_size, stella_hidden_size]
 
         # Count valid (non-padded) tokens per cell, clamp to avoid division by zero
-        sum_mask = attention_mask.sum(dim=1, keepdim=True).clamp(min=1e-9).to(hidden_states.dtype)
+        sum_mask = attention_mask.sum(dim=1, keepdim=True).clamp(min=1e-9).to(torch.float32)
         # [chunk_size, 1]
 
         # Compute mean over valid tokens only
-        cell_embeddings = sum_embeddings / sum_mask
+        cell_embeddings = (sum_embeddings / sum_mask).to(hidden_states.dtype)
         # [chunk_size, stella_hidden_size]
 
         # ---- Projection ----
@@ -427,22 +447,30 @@ class SCMIL_STELLA_AttnMoE(nn.Module):
             K_t = K.transpose(1, 2)  # [num_heads, head_dim, seq_len]
             V_t = V.transpose(1, 2)  # [num_heads, head_dim, seq_len]
 
-            # Adaptive projection matrix slicing/interpolation
-            if seq_len <= self.E_proj.weight.size(0):
-                E_proj_matrix = self.E_proj.weight[:seq_len, :self.linformer_k]
-                F_proj_matrix = self.F_proj.weight[:seq_len, :self.linformer_k]
+            # 核心修复 1：提取并转置权重矩阵，使其形状明确为 [10000, linformer_k]
+            # nn.Linear(10000, linformer_k) 的 .weight 形状底层是 [linformer_k, 10000]
+            E_weight_T = self.E_proj.weight.T 
+            F_weight_T = self.F_proj.weight.T 
+
+            # 核心修复 2：正确判断 seq_len 是否超出预设最大细胞数 (E_weight_T.size(0) 即 10000)
+            if seq_len <= E_weight_T.size(0):
+                # 正确切片：取前 seq_len 行 (序列维)，保留全部的 linformer_k 列 (特征维)
+                E_proj_matrix = E_weight_T[:seq_len, :self.linformer_k]
+                F_proj_matrix = F_weight_T[:seq_len, :self.linformer_k]
             else:
-                # Dynamically interpolate projection matrices for seq_len > 10000
+                # 核心修复 3：动态双线性插值目标 size 修正为 (seq_len, linformer_k)
+                # 将序列维度(10000)拉长到 seq_len，保持特征维度(128)不变
                 E_proj_matrix = F.interpolate(
-                    self.E_proj.weight.T.unsqueeze(0).unsqueeze(0),
-                    size=(self.linformer_k, seq_len),
+                    E_weight_T.unsqueeze(0).unsqueeze(0), # 形状: [1, 1, 10000, linformer_k]
+                    size=(seq_len, self.linformer_k),
                     mode='bilinear', align_corners=False
-                ).squeeze(0).squeeze(0).T
+                ).squeeze(0).squeeze(0)  # 还原形状为 [seq_len, linformer_k]，注意这里不再需要 .T
+                
                 F_proj_matrix = F.interpolate(
-                    self.F_proj.weight.T.unsqueeze(0).unsqueeze(0),
-                    size=(self.linformer_k, seq_len),
+                    F_weight_T.unsqueeze(0).unsqueeze(0),
+                    size=(seq_len, self.linformer_k),
                     mode='bilinear', align_corners=False
-                ).squeeze(0).squeeze(0).T
+                ).squeeze(0).squeeze(0)
 
             # E_proj_matrix: [seq_len, linformer_k]
             K = torch.matmul(K_t, E_proj_matrix)  # [num_heads, head_dim, linformer_k]
