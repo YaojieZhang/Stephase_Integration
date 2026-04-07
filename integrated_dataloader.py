@@ -264,7 +264,8 @@ class StellaInlineTokenizer:
 
             # Truncate to max_length
             if len(nonzero_indices) > self.max_length:
-                nonzero_indices = nonzero_indices[:self.max_length]
+                nonzero_indices = np.random.choice(nonzero_indices, self.max_length, replace=False)
+                nonzero_indices = np.sort(nonzero_indices)
 
             # Gene symbol IDs for this cell's expressed genes
             cell_gene_sym = gene_symbol_ids_full[nonzero_indices]
