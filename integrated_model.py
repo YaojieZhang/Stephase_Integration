@@ -155,24 +155,25 @@ class SCMIL_STELLA_AttnMoE(nn.Module):
         # The Linformer projects K and V to a fixed low-rank dimension,
         # reducing attention complexity from O(n²) to O(n·k).
         hidden_dim = self.mil_hidden_dim
-        self.num_heads = mil_cfg.get('num_heads', 8)
-        self.head_dim = hidden_dim // self.num_heads
-
-        self.q_proj = nn.Linear(hidden_dim, hidden_dim)
-        self.k_proj = nn.Linear(hidden_dim, hidden_dim)
-        self.v_proj = nn.Linear(hidden_dim, hidden_dim)
-        self.out_proj = nn.Linear(hidden_dim, hidden_dim)
-        self.attn_dropout = nn.Dropout(mil_cfg.get('linformer_dropout', 0.3))
-
+        
         if self.attention_type == 'linformer':
+            self.num_heads = mil_cfg.get('num_heads', 8)
+            self.head_dim = hidden_dim // self.num_heads
+
+            self.q_proj = nn.Linear(hidden_dim, hidden_dim)
+            self.k_proj = nn.Linear(hidden_dim, hidden_dim)
+            self.v_proj = nn.Linear(hidden_dim, hidden_dim)
+            self.out_proj = nn.Linear(hidden_dim, hidden_dim)
+            self.attn_dropout = nn.Dropout(mil_cfg.get('linformer_dropout', 0.3))   
+
             self.linformer_k = mil_cfg.get('linformer_k', 128)
             # Project sequence dimension from up to max_instances to linformer_k
             # Using 10000 as the max seq_len to match original scPhase design
             self.E_proj = nn.Linear(10000, self.linformer_k, bias=False)
             self.F_proj = nn.Linear(10000, self.linformer_k, bias=False)
 
-        self.norm1 = nn.LayerNorm(hidden_dim)
-        self.norm2 = nn.LayerNorm(hidden_dim)
+            self.norm1 = nn.LayerNorm(hidden_dim)
+            self.norm2 = nn.LayerNorm(hidden_dim)
 
         # ==================================================================
         # Stage 4: Instance Dropout + MoE MIL Aggregation
@@ -226,10 +227,16 @@ class SCMIL_STELLA_AttnMoE(nn.Module):
         # ---- Initialize MIL-side weights (STELLA weights are pre-trained) ----
         # Only initialize the non-STELLA components
         initialize_weights(self.projector)
-        initialize_weights(self.q_proj)
-        initialize_weights(self.k_proj)
-        initialize_weights(self.v_proj)
-        initialize_weights(self.out_proj)
+        if self.attention_type == 'linformer':
+            initialize_weights(self.q_proj)
+            initialize_weights(self.k_proj)
+            initialize_weights(self.v_proj)
+            initialize_weights(self.out_proj)
+            initialize_weights(self.E_proj)
+            initialize_weights(self.F_proj)
+            initialize_weights(self.norm1)
+            initialize_weights(self.norm2)
+            
         initialize_weights(self.mil_aggregator)
         initialize_weights(self.classifier)
         if self.use_domain_adaptation:
