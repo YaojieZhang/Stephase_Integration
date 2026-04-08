@@ -61,8 +61,6 @@ class StellaInlineTokenizer:
         bin_boundary_path: str,
         input_gene_expr_type: str = "bin",
         max_length: int = 4096,
-        do_normalize: bool = True,
-        do_qc: bool = False,
     ):
         """
         Args:
@@ -70,8 +68,6 @@ class StellaInlineTokenizer:
             bin_boundary_path:    Path to the bin_100.pkl bin boundary file.
             input_gene_expr_type: "bin" for discretized expression, "continuous" for raw float values.
             max_length:           Maximum sequence length (genes per cell). Truncates if exceeded.
-            do_normalize:         Whether to run sc.pp.normalize_total + sc.pp.log1p.
-            do_qc:                Whether to run basic QC filtering.
         """
         # ---- Load gene symbol vocabulary: {gene_name: token_id} ----
         with open(gene2id_path, "rb") as f:
@@ -86,88 +82,9 @@ class StellaInlineTokenizer:
 
         self.input_gene_expr_type = input_gene_expr_type
         self.max_length = max_length
-        self.do_normalize = do_normalize
-        self.do_qc = do_qc
 
         # PAD_TOKEN_ID must match stella.vocab.PAD_TOKEN_ID = 0
         self.pad_token_id = 0
-
-    def _preprocess_adata(self, adata: sc.AnnData) -> sc.AnnData:
-        """
-        Preprocess the AnnData object:
-          1. Deduplicate gene names (remove .1, .2 suffixes from var_names_make_unique)
-          2. Filter to genes present in the STELLA vocabulary
-          3. Optionally QC and normalize
-
-        Args:
-            adata: Raw AnnData object (subset for one patient/sample).
-
-        Returns:
-            Preprocessed AnnData with genes filtered to vocabulary.
-        """
-        # Step 1: Clean gene names — remove `.1`, `.2` suffixes added by sc.var_names_make_unique()
-        adata.var_names = adata.var_names.str.replace(r'\.\d+$', '', regex=True)
-        duplicated_genes = adata.var_names.duplicated(keep="first")
-        adata = adata[:, ~duplicated_genes].copy()
-
-        # Step 2: Filter to genes present in the STELLA vocabulary
-        genes_in_vocab = self.gene2id.keys()
-        gene_mask = adata.var_names.isin(genes_in_vocab)
-        adata = adata[:, gene_mask].copy()
-
-        if adata.shape[1] == 0:
-            logger.warning("[StellaInlineTokenizer] No genes matched the STELLA vocabulary! "
-                         "Check if gene names are compatible (e.g., HUGO symbols).")
-            return adata
-
-        # Step 3: Optional QC (basic cell/gene filtering)
-        if self.do_qc:
-            sc.pp.filter_cells(adata, min_genes=500)
-            sc.pp.filter_cells(adata, min_counts=1000)
-
-        # Step 4: Normalize + log1p (required before binning)
-        if self.do_normalize:
-            sc.pp.normalize_total(adata, target_sum=1e4)
-            sc.pp.log1p(adata)
-
-        return adata
-
-    def _bin_expression(self, adata: sc.AnnData) -> None:
-        """
-        Discretize expression values into bin IDs using the pre-computed bin boundaries.
-        This is an IN-PLACE operation on adata.X.
-
-        The binning logic replicates stella.tokenizer.TranscriptomeTokenizer.bin():
-          1. np.digitize to assign bin IDs
-          2. Clamp bin 0 → 1 and bin (nbins+1) → nbins
-          3. Cast to int16 for memory efficiency
-
-        Args:
-            adata: AnnData with normalized+log1p expression in .X
-        """
-        # Ensure dense matrix for element-wise operations
-        if issparse(adata.X):
-            adata.X = adata.X.toarray()
-
-        # Track which entries were originally nonzero
-        nonzero_mask_before = adata.X != 0
-
-        # Digitize: assign each nonzero expression value to a bin ID
-        adata.X[adata.X != 0] = np.digitize(
-            adata.X[adata.X != 0], self.bin_boundary, right=False
-        )
-
-        # After digitize, some values at the exact left boundary might map to bin 0.
-        # We clamp those to bin 1 (the first valid bin).
-        nonzero_mask_after = adata.X != 0
-        became_zero = np.logical_xor(nonzero_mask_before, nonzero_mask_after)
-        adata.X[became_zero] = 1
-
-        # Values exceeding the last boundary map to nbins+1; clamp to nbins
-        adata.X[adata.X == self.nbins + 1] = self.nbins
-
-        # Cast to int16 for memory efficiency
-        adata.X = adata.X.astype(np.int16)
 
     def tokenize_sample(self, sample_data_csr, global_gene_ids):
         num_cells = sample_data_csr.shape[0]
@@ -462,7 +379,7 @@ class StellaScPhaseDataset(Dataset):
                     sampled_indices = np.random.choice(num_cells, max_instances, replace=False)
                     sampled_indices = np.sort(sampled_indices) # 保持稀疏矩阵连续性
                 else:
-                    # 验证/测试集：确定性均匀采样，保证可复现并且覆盖全样本特征特征
+                    # 验证/测试集：确定性均匀采样，保证可复现并且覆盖全样本特征
                     sampled_indices = np.linspace(0, num_cells - 1, max_instances, dtype=int)
                 
                 sample_data = sample_data[sampled_indices]
@@ -609,10 +526,9 @@ def create_tokenizer_from_config(config: dict) -> StellaInlineTokenizer:
         bin_boundary_path=llm_cfg['bin_boundary_path'],
         input_gene_expr_type=llm_cfg['input_gene_expr_type'],
         max_length=llm_cfg.get('llm_max_seq_len', 4096),
-        do_normalize=llm_cfg.get('do_normalize', False),
-        do_qc=llm_cfg.get('do_qc', False),
     )
     tokenizer.max_instances = config["mil_params"].get("max_instances", 10000)
 
     return tokenizer
+
 
