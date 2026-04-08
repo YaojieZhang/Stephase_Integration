@@ -531,4 +531,3 @@ def create_tokenizer_from_config(config: dict) -> StellaInlineTokenizer:
 
     return tokenizer
 
-
