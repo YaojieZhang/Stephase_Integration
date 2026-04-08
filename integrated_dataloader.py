@@ -169,115 +169,55 @@ class StellaInlineTokenizer:
         # Cast to int16 for memory efficiency
         adata.X = adata.X.astype(np.int16)
 
-    def tokenize_sample(
-        self, sample_data: np.ndarray, gene_names: np.ndarray
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """
-        Tokenize a single patient's cell-gene matrix.
-
-        This is the core method that converts raw expression data into
-        the three tensors required by STELLAModel.forward().
-
-        Args:
-            sample_data: Dense or sparse matrix of shape [num_cells, num_original_genes].
-                         These are the raw/HVG expression values from the h5ad file.
-            gene_names:  Array of gene names corresponding to columns of sample_data.
-                         Length = num_original_genes.
-
-        Returns:
-            input_ids_gene_symbol:      np.ndarray [num_cells, seq_len] — Gene vocab IDs
-            input_ids_gene_expression:  np.ndarray [num_cells, seq_len] — Bin IDs or continuous values
-            attention_mask:             np.ndarray [num_cells, seq_len] — 1=real, 0=pad
-
-        Data Flow (per cell):
-            1. Extract nonzero gene indices for this cell
-            2. Map gene names → vocab IDs (input_ids_gene_symbol)
-            3. Map expression values → bin IDs (input_ids_gene_expression)
-            4. Truncate to max_length if necessary
-            5. Pad all cells to the same seq_len within this sample
-        """
-        # ---- Create a temporary AnnData for preprocessing ----
-        if issparse(sample_data):
-            sample_data_dense = sample_data.toarray()
-        else:
-            sample_data_dense = np.array(sample_data, dtype=np.float32)
-
-        # Build a minimal AnnData for preprocessing
-        import pandas as pd
-        adata_tmp = sc.AnnData(
-            X=csr_matrix(sample_data_dense),
-            var=pd.DataFrame(index=gene_names)
-        )
-
-        # ---- Preprocess: filter vocab genes, normalize, bin ----
-        adata_tmp = self._preprocess_adata(adata_tmp)
-
-        if adata_tmp.shape[1] == 0:
-            # No genes matched vocabulary — return empty tensors
-            num_cells = sample_data_dense.shape[0]
-            logger.warning(f"[tokenize_sample] 0 genes matched vocab for sample with {num_cells} cells.")
-            return (
-                np.zeros((num_cells, 1), dtype=np.int64),
-                np.zeros((num_cells, 1), dtype=np.int64),
-                np.zeros((num_cells, 1), dtype=np.int64),
-            )
-
-        # After preprocessing, get the gene-to-id mapping for remaining genes
-        remaining_gene_names = adata_tmp.var_names
-
-        # ---- Expression binning (only for "bin" type) ----
+    def tokenize_sample(self, sample_data_csr, global_gene_ids):
+        num_cells = sample_data_csr.shape[0]
+        all_gene_sym, all_gene_expr, all_lengths = [], [], []
+    
+        # 极速稀疏矩阵 Binning (操作副本来防缓存污染)
+        csr_data_local = sample_data_csr.data.copy()
         if self.input_gene_expr_type == "bin":
-            self._bin_expression(adata_tmp)
+            binned_data = np.digitize(csr_data_local, self.bin_boundary, right=False)
+            binned_data[binned_data == 0] = 1
+            binned_data[binned_data == self.nbins + 1] = self.nbins
+            csr_data_local = binned_data.astype(np.int64)
+        else:   
+            csr_data_local = csr_data_local.astype(np.float32)
 
-        # Ensure dense for iteration
-        if issparse(adata_tmp.X):
-            X_dense = adata_tmp.X.toarray()
-        else:
-            X_dense = np.array(adata_tmp.X)
+        indptr = sample_data_csr.indptr
+        indices = sample_data_csr.indices
 
-        num_cells = X_dense.shape[0]
+        for i in range(num_cells):
+            start, end = indptr[i], indptr[i+1]
+            
+            # 取出当前细胞的 基因列索引 和 对应的表达量
+            col_indices = indices[start:end]
+            cell_expr = csr_data_local[start:end]
 
-        # ---- Gene symbol IDs (shared across all cells since genes are the same) ----
-        # All cells in a sample share the same gene set after preprocessing
-        gene_symbol_ids_full = np.array(
-            [self.gene2id[g] for g in remaining_gene_names], dtype=np.int64
-        )
+            # 核心：将 h5ad 的列索引 转换为 LLM 词表 Token ID
+            cell_gene_ids = global_gene_ids[col_indices]
+            
+            # 使用 -1 掩码过滤掉不在 大模型词表 中的基因
+            valid_mask = cell_gene_ids != -1
+            nonzero_gene_ids = cell_gene_ids[valid_mask]
+            nonzero_expr = cell_expr[valid_mask]
 
-        # ---- Per-cell tokenization ----
-        all_gene_sym = []
-        all_gene_expr = []
-        all_lengths = []
-
-        for cell_idx in range(num_cells):
-            cell_expr = X_dense[cell_idx]  # [num_genes_in_vocab]
-
-            # Extract nonzero positions — STELLA only processes expressed genes
-            nonzero_mask = cell_expr != 0
-            nonzero_indices = np.where(nonzero_mask)[0]
-
-            if len(nonzero_indices) == 0:
-                # Cell has no expressed genes in vocab — create a minimal token
+            if len(nonzero_gene_ids) == 0:
                 all_gene_sym.append(np.array([self.pad_token_id], dtype=np.int64))
                 all_gene_expr.append(np.array([self.pad_token_id], dtype=np.int64))
                 all_lengths.append(0)
                 continue
+            
+            if len(nonzero_gene_ids) > self.max_length:
+                # 随机采样并排序
+                keep_idx = np.random.choice(len(nonzero_gene_ids), self.max_length, replace=False)
+                keep_idx.sort()
+                nonzero_gene_ids = nonzero_gene_ids[keep_idx]
+                nonzero_expr = nonzero_expr[keep_idx]
 
-            # Truncate to max_length
-            if len(nonzero_indices) > self.max_length: 
-                # Randomly sample genes to fit max_length (could also take top-k by expression, but random is simpler)
-                nonzero_indices = np.random.choice(nonzero_indices, self.max_length, replace=False)
-                nonzero_indices = np.sort(nonzero_indices) # 保持顺序有利于内存连续读取
-                
-
-            # Gene symbol IDs for this cell's expressed genes
-            cell_gene_sym = gene_symbol_ids_full[nonzero_indices]
-
-            # Expression values (bin IDs or continuous) for this cell's expressed genes
-            cell_gene_expr = cell_expr[nonzero_indices].astype(np.int64 if self.input_gene_expr_type == "bin" else np.float32)
-
-            all_gene_sym.append(cell_gene_sym)
-            all_gene_expr.append(cell_gene_expr)
-            all_lengths.append(len(nonzero_indices))
+            all_gene_sym.append(nonzero_gene_ids)
+            all_gene_expr.append(nonzero_expr)
+            all_lengths.append(len(nonzero_gene_ids))
+            
 
         # ---- Pad all cells to the same length within this sample ----
         max_seq_len = max(max(all_lengths), 1)  # At least length 1
@@ -454,6 +394,7 @@ class StellaScPhaseDataset(Dataset):
         sample_ids: List[str],
         gene_names: np.ndarray,
         tokenizer: StellaInlineTokenizer,
+        is_train: bool = True
     ):
         """
         Args:
@@ -464,6 +405,7 @@ class StellaScPhaseDataset(Dataset):
             gene_names:   Array of gene name strings (columns of data_list matrices).
             tokenizer:    StellaInlineTokenizer instance.
             max_instances: Maximum number of cells to process per patient (to prevent FLOPs explosion).
+            is_train:     Whether this dataset is for training (random bag dropout) or testing (deterministic uniform sampling).
         """
         super().__init__()
         self.data_list = data_list
@@ -472,7 +414,19 @@ class StellaScPhaseDataset(Dataset):
         self.sample_ids = sample_ids
         self.gene_names = gene_names
         self.tokenizer = tokenizer
+        self.is_train = is_train
         self.max_instances = getattr(tokenizer, 'max_instances', 10000)
+
+
+        # ==== 新增：全局基因名到词汇 ID 的映射表 ====
+        # 这让我们在 __getitem__ 中不需要重复处理字符串匹配
+        # 将不需要的基因标为 -1，后续用以过滤
+        global_gene_ids = np.full(len(self.gene_names), -1, dtype=np.int64)
+        for i, g_name in enumerate(self.gene_names):
+            clean_name = g_name.split('.')[0] # 清理 .1 .2 后缀
+            if clean_name in self.tokenizer.gene2id:
+                global_gene_ids[i] = self.tokenizer.gene2id[clean_name]
+        self.global_gene_ids = global_gene_ids # 保存到实例变量中
 
         # Cache for tokenized results to avoid re-tokenizing the same sample
         # WARNING: This can consume significant memory for large datasets.
@@ -503,14 +457,18 @@ class StellaScPhaseDataset(Dataset):
             num_cells = sample_data.shape[0]
             max_instances = self.max_instances
             if num_cells > max_instances:
-                # 随机无放回采样 1024 个细胞
-                sampled_indices = np.random.choice(num_cells, max_instances, replace=False)
-                # 排序以保持稀疏矩阵在内存中的连续性，加速运算
-                sampled_indices = np.sort(sampled_indices)
+                if getattr(self, 'is_train', True):
+                    # 训练集：随机无放回采样 (Bag Dropout 增强)
+                    sampled_indices = np.random.choice(num_cells, max_instances, replace=False)
+                    sampled_indices = np.sort(sampled_indices) # 保持稀疏矩阵连续性
+                else:
+                    # 验证/测试集：确定性均匀采样，保证可复现并且覆盖全样本特征特征
+                    sampled_indices = np.linspace(0, num_cells - 1, max_instances, dtype=int)
+                
                 sample_data = sample_data[sampled_indices]
 
             gene_sym, gene_expr, attn_mask = self.tokenizer.tokenize_sample(
-                sample_data, self.gene_names
+                sample_data, self.global_gene_ids
             )
             # gene_sym:   np.ndarray [num_cells, seq_len] int64
             # gene_expr:  np.ndarray [num_cells, seq_len] int64 or float32
@@ -657,3 +615,4 @@ def create_tokenizer_from_config(config: dict) -> StellaInlineTokenizer:
     tokenizer.max_instances = config["mil_params"].get("max_instances", 10000)
 
     return tokenizer
+
