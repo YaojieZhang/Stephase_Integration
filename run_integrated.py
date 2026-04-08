@@ -335,10 +335,10 @@ def train_and_evaluate_fold(
     # 3.2: Create Datasets & DataLoaders
     # ==================================================================
     train_dataset = StellaScPhaseDataset(
-        train_data, train_label, train_batch_mapped, train_sids, GeneNames, tokenizer
+        train_data, train_label, train_batch_mapped, train_sids, GeneNames, tokenizer, is_train=True
     )
     valid_dataset = StellaScPhaseDataset(
-        valid_data, valid_label, valid_batch_mapped, valid_sids, GeneNames, tokenizer
+        valid_data, valid_label, valid_batch_mapped, valid_sids, GeneNames, tokenizer, is_train=False
     )
 
     train_loader = DataLoader(
@@ -509,12 +509,9 @@ def train_and_evaluate_fold(
 
                     # ---- Compute disease loss ----
                     # disease_out: [n_classes], labels: [1] → unsqueeze for CE
-                    if task_type == "classification":
-                        disease_loss = disease_criterion(disease_out.unsqueeze(0), labels)
-                    else:
-                        # 强制拉平为 1D 张量，避免标量和二维张量的 Broadcasting
-                        disease_loss = disease_criterion(disease_out.view(-1), labels.view(-1))
-                    
+                    disease_loss = disease_criterion(
+                        disease_out.unsqueeze(0), labels
+                    )
                     loss = disease_loss
 
                     # ---- Compute domain adaptation loss (optional) ----
@@ -573,7 +570,7 @@ def train_and_evaluate_fold(
                     logger.error(
                         f"[RuntimeError] Skipping sample '{sid}': {str(e)[:200]}"
                     )
-                    logger.debug(traceback.format_exc())
+                    logger.error(traceback.format_exc())
                     if torch.cuda.is_available():
                         torch.cuda.empty_cache()
                     optimizer.zero_grad(set_to_none=True)
@@ -587,7 +584,7 @@ def train_and_evaluate_fold(
                 logger.error(
                     f"[Exception] Skipping sample '{sid}': {type(e).__name__}: {str(e)[:300]}"
                 )
-                logger.debug(traceback.format_exc())
+                logger.error(traceback.format_exc())
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
                 optimizer.zero_grad(set_to_none=True)
@@ -646,8 +643,8 @@ def train_and_evaluate_fold(
                         val_probs.append(probs.cpu().numpy())
                         val_true.append(labels.cpu().numpy())
                     else:
-                        val_preds.append(disease_out.detach().float().cpu().item())
-                        val_true.append(labels.detach().float().cpu().item())
+                        val_preds.append(disease_out.float().cpu().numpy())
+                        val_true.append(labels.squeeze().cpu().numpy())
 
                 except RuntimeError as e:
                     if "out of memory" in str(e):
@@ -707,7 +704,7 @@ def train_and_evaluate_fold(
         [domain_mapping.get(b, 0) for b in batch_test]
     )
     test_dataset = StellaScPhaseDataset(
-        X_test, y_test, test_batch_mapped, sid_test, GeneNames, tokenizer
+        X_test, y_test, test_batch_mapped, sid_test, GeneNames, tokenizer, is_train=False
     )
     test_loader = DataLoader(
         test_dataset,
@@ -976,8 +973,8 @@ Examples:
     parser.add_argument(
         "--config",
         type=str,
-        default="./StePhase/config_integration.json",
-        help="Path to the JSON configuration file (default: ./StePhase/config_integration.json)",
+        default="./config_integration.json",
+        help="Path to the JSON configuration file (default: ./config_integration.json)",
     )
     args = parser.parse_args()
 
