@@ -37,16 +37,16 @@
   },
 
   "mil_params": {
-    "max_instances": 256,
+    "max_instances": 512,
     "mil_hidden_dim": 256,
     "attention_type": "linformer",
     "num_heads": 8,
     "linformer_k": 128,
     "linformer_dropout": 0.3,
     "use_moe": true,
-    "moe_num_experts": 8,
+    "moe_num_experts": 4,
     "moe_dropout": 0.2,
-    "instance_dropout_rate": 0.2,
+    "instance_dropout_rate": 0.1,
     "classifier_dims": [128, 64],
     "classifier_dropout_rates": [0.1, 0.1],
     "n_classes": 3,
@@ -57,14 +57,15 @@
     "epochs": 150,
     "batch_size": 1, 
     "num_workers": 4,
-    "early_stopping_patience": 15,
-    "val_size": 0.15,
+    "early_stopping_patience": 20,
+    "val_size": 0.20,
     "llm_lr": 1e-5,
-    "mil_lr": 1e-3,
+    "mil_lr": 1e-4,
     "weight_decay": 1e-4,
     "betas": [0.9, 0.999],
-    "clip_grad_norm": 1.0,
-    "warmup_epochs": 10,
+    "clip_grad_norm": 0.5,
+    "warmup_epochs": 3,
     "use_amp": true
   }
 }
+
