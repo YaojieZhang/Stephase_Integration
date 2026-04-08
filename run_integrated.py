@@ -46,6 +46,8 @@ from sklearn.metrics import (
     mean_absolute_error, r2_score,
 )
 from sklearn.utils.class_weight import compute_class_weight
+from datetime import datetime                                              # ===== [TensorBoard] =====
+from torch.utils.tensorboard import SummaryWriter                          # ===== [TensorBoard] =====
 from scipy.stats import pearsonr
 
 # ---- Local imports from the integration package ----
@@ -240,6 +242,7 @@ def train_and_evaluate_fold(
     tokenizer,
     config: dict,
     use_domain_adaptation: bool,
+    tb_writer: SummaryWriter = None,                                       # ===== [TensorBoard] =====
 ) -> dict:
     """
     Train and evaluate the SCMIL_STELLA_AttnMoE model for a single CV fold.
@@ -282,6 +285,9 @@ def train_and_evaluate_fold(
     task_type = run_cfg["task_type"]
     seed = run_cfg["seed"]
     set_seed(seed)
+
+    # ===== [TensorBoard] 全局步数计数器，用于 step-level 的日志记录 =====
+    global_step = 0
 
     # ==================================================================
     # 3.1: Train / Validation / Test Split
@@ -374,6 +380,16 @@ def train_and_evaluate_fold(
     ).to(device)
 
     param_count = model.get_param_count()
+
+    # ===== [TensorBoard] 记录模型参数量到 TensorBoard text =====
+    if tb_writer is not None:
+        tb_writer.add_text(
+            f"Fold{fold+1}/model_info",
+            f"Total: {param_count['total']:,} | "
+            f"Trainable: {param_count['trainable']:,} | "
+            f"Frozen: {param_count['frozen']:,}",
+            0,
+        )
     logger.info(
         f"Model parameters — Total: {param_count['total']:,} | "
         f"Trainable: {param_count['trainable']:,} | "
@@ -539,6 +555,68 @@ def train_and_evaluate_fold(
 
                 total_train_loss += disease_loss.item()
                 n_train_samples += 1
+                global_step += 1                                           # ===== [TensorBoard] =====
+
+                # ===== [TensorBoard] Step-level 实时标量日志 =====
+                if tb_writer is not None:
+                    # 1) 每一步的 disease loss
+                    tb_writer.add_scalar(
+                        f"Fold{fold+1}/Step/disease_loss",
+                        disease_loss.item(), global_step,
+                    )
+                    # 2) 域适应 loss (如有)
+                    if domain_weight > 0 and domain_out is not None:
+                        tb_writer.add_scalar(
+                            f"Fold{fold+1}/Step/domain_loss",
+                            domain_loss.item(), global_step,
+                        )
+                    # 3) 总 loss
+                    tb_writer.add_scalar(
+                        f"Fold{fold+1}/Step/total_loss",
+                        loss.item(), global_step,
+                    )
+                    # 4) 当前学习率 (各参数组)
+                    for pg_idx, pg in enumerate(optimizer.param_groups):
+                        pg_name = pg.get('name', f'group{pg_idx}')
+                        tb_writer.add_scalar(
+                            f"Fold{fold+1}/LR/{pg_name}",
+                            pg['lr'], global_step,
+                        )
+                    # 5) 每个 sample 的细胞数 (用于分析 bag size 与 loss 的关系)
+                    tb_writer.add_scalar(
+                        f"Fold{fold+1}/Step/n_cells",
+                        gene_sym.size(0), global_step,
+                    )
+                    # 6) 梯度范数 (仅 MIL 可训练参数, 每 10 步记录一次减少开销)
+                    if global_step % 10 == 0:
+                        mil_grad_norm = 0.0
+                        for p in model.parameters():
+                            if p.requires_grad and p.grad is not None:
+                                mil_grad_norm += p.grad.data.norm(2).item() ** 2
+                        mil_grad_norm = mil_grad_norm ** 0.5
+                        tb_writer.add_scalar(
+                            f"Fold{fold+1}/Step/grad_norm",
+                            mil_grad_norm, global_step,
+                        )
+                    # 7) GPU 显存使用 (每 20 步记录一次)
+                    if global_step % 20 == 0 and torch.cuda.is_available():
+                        gpu_mem_alloc = torch.cuda.memory_allocated() / (1024**3)
+                        gpu_mem_reserved = torch.cuda.memory_reserved() / (1024**3)
+                        tb_writer.add_scalar(
+                            f"Fold{fold+1}/GPU/memory_allocated_GB",
+                            gpu_mem_alloc, global_step,
+                        )
+                        tb_writer.add_scalar(
+                            f"Fold{fold+1}/GPU/memory_reserved_GB",
+                            gpu_mem_reserved, global_step,
+                        )
+                    # 8) MIL Attention 权重分布 (每 50 步记录直方图)
+                    if global_step % 50 == 0 and attn_weights is not None:
+                        tb_writer.add_histogram(
+                            f"Fold{fold+1}/Attention/weights",
+                            attn_weights.detach().cpu().float(), global_step,
+                        )
+                # ===== [TensorBoard] End step-level logging =====
 
                 # Update progress bar with running loss
                 pbar.set_postfix({
@@ -600,6 +678,22 @@ def train_and_evaluate_fold(
             f"Samples: {n_train_samples} | "
             f"OOM Skips: {n_skipped_oom}"
         )
+
+        # ===== [TensorBoard] Epoch-level 训练汇总标量 =====
+        if tb_writer is not None:
+            tb_writer.add_scalar(f"Fold{fold+1}/Epoch/train_loss", avg_train_loss, epoch)
+            tb_writer.add_scalar(f"Fold{fold+1}/Epoch/domain_loss", avg_domain_loss, epoch)
+            tb_writer.add_scalar(f"Fold{fold+1}/Epoch/oom_skips", n_skipped_oom, epoch)
+            tb_writer.add_scalar(f"Fold{fold+1}/Epoch/alpha_grl", alpha, epoch)
+            tb_writer.add_scalar(f"Fold{fold+1}/Epoch/domain_weight", domain_weight, epoch)
+            # MIL 模块各层参数分布 (每 5 个 epoch 记录一次以减少存储)
+            if (epoch + 1) % 5 == 0:
+                for name, param in model.named_parameters():
+                    if param.requires_grad and not name.startswith('stella_encoder'):
+                        tb_writer.add_histogram(
+                            f"Fold{fold+1}/Params/{name}", param.detach().cpu().float(), epoch,
+                        )
+        # ===== [TensorBoard] End epoch-level train logging =====
 
         # ==================================================================
         # 3.9: Validation Loop
@@ -671,12 +765,46 @@ def train_and_evaluate_fold(
                 f"Loss: {avg_val_loss:.4f} | AUC: {val_auc:.4f} | Acc: {val_acc:.4f}"
             )
             early_stopping(val_auc, model)
+
+            # ===== [TensorBoard] Epoch-level 验证指标 (分类) =====
+            if tb_writer is not None:
+                tb_writer.add_scalar(f"Fold{fold+1}/Epoch/val_loss", avg_val_loss, epoch)
+                tb_writer.add_scalar(f"Fold{fold+1}/Epoch/val_auc", val_auc, epoch)
+                tb_writer.add_scalar(f"Fold{fold+1}/Epoch/val_acc", val_acc, epoch)
+                # 同时对比 train vs val loss (方便观察过拟合)
+                tb_writer.add_scalars(
+                    f"Fold{fold+1}/Compare/loss",
+                    {"train": avg_train_loss, "val": avg_val_loss}, epoch,
+                )
+                # Early stopping 状态
+                tb_writer.add_scalar(
+                    f"Fold{fold+1}/EarlyStopping/counter",
+                    early_stopping.counter, epoch,
+                )
+                if early_stopping.best_score is not None:
+                    tb_writer.add_scalar(
+                        f"Fold{fold+1}/EarlyStopping/best_auc",
+                        early_stopping.best_score, epoch,
+                    )
+            # ===== [TensorBoard] End epoch-level val classification =====
+
         elif task_type == "regression" and len(val_true) > 0:
             val_r2 = r2_score(val_true, val_preds)
             logger.info(
                 f"Epoch {epoch+1} Valid | Loss: {avg_val_loss:.4f} | R2: {val_r2:.4f}"
             )
             early_stopping(val_r2, model)
+
+            # ===== [TensorBoard] Epoch-level 验证指标 (回归) =====
+            if tb_writer is not None:
+                tb_writer.add_scalar(f"Fold{fold+1}/Epoch/val_loss", avg_val_loss, epoch)
+                tb_writer.add_scalar(f"Fold{fold+1}/Epoch/val_r2", val_r2, epoch)
+                tb_writer.add_scalars(
+                    f"Fold{fold+1}/Compare/loss",
+                    {"train": avg_train_loss, "val": avg_val_loss}, epoch,
+                )
+            # ===== [TensorBoard] End epoch-level val regression =====
+
         else:
             logger.warning(f"Epoch {epoch+1} Valid | No valid samples evaluated.")
 
@@ -761,6 +889,16 @@ def train_and_evaluate_fold(
             f"Fold {fold+1} Test | AUC={results['auc']:.4f} | "
             f"Acc={results['acc']:.4f} | F1={results['f1']:.4f}"
         )
+
+        # ===== [TensorBoard] 测试集最终指标 =====
+        if tb_writer is not None:
+            tb_writer.add_scalar(f"Test/auc", results["auc"], fold)
+            tb_writer.add_scalar(f"Test/acc", results["acc"], fold)
+            tb_writer.add_scalar(f"Test/precision", results["precision"], fold)
+            tb_writer.add_scalar(f"Test/recall", results["recall"], fold)
+            tb_writer.add_scalar(f"Test/f1", results["f1"], fold)
+        # ===== [TensorBoard] End test classification =====
+
     elif task_type == "regression" and len(test_true) > 0:
         results["mse"] = mean_squared_error(test_true, test_preds)
         results["mae"] = mean_absolute_error(test_true, test_preds)
@@ -770,6 +908,15 @@ def train_and_evaluate_fold(
             f"Fold {fold+1} Test | MSE={results['mse']:.4f} | "
             f"R2={results['r2']:.4f} | Pearson={results['pearson']:.4f}"
         )
+
+        # ===== [TensorBoard] 测试集最终指标 (回归) =====
+        if tb_writer is not None:
+            tb_writer.add_scalar(f"Test/mse", results["mse"], fold)
+            tb_writer.add_scalar(f"Test/mae", results["mae"], fold)
+            tb_writer.add_scalar(f"Test/r2", results["r2"], fold)
+            tb_writer.add_scalar(f"Test/pearson", results["pearson"], fold)
+        # ===== [TensorBoard] End test regression =====
+
     else:
         logger.warning(f"Fold {fold+1}: No test samples evaluated successfully.")
 
@@ -817,6 +964,25 @@ def run_cv_experiment(config_path: str):
         logger.info(f"GPU: {gpu_name} | VRAM: {gpu_mem:.1f} GB")
 
     set_seed(config["run_params"]["seed"])
+
+    # ===== [TensorBoard] 初始化 SummaryWriter =====
+    tb_log_dir = os.path.join(
+        config["path_params"]["RESULTS_DIR"],
+        "tensorboard",
+        f"{config['path_params']['MODEL_NAME']}_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+    )
+    os.makedirs(tb_log_dir, exist_ok=True)
+    tb_writer = SummaryWriter(log_dir=tb_log_dir)
+    logger.info(f"[TensorBoard] SummaryWriter initialized. Log dir: {tb_log_dir}")
+    logger.info(f"[TensorBoard] 启动命令: tensorboard --logdir={os.path.dirname(tb_log_dir)}")
+
+    # 将完整配置写入 TensorBoard text 标签页，方便实验回溯
+    tb_writer.add_text(
+        "Experiment/config",
+        f"```json\n{json.dumps(config, indent=2, ensure_ascii=False)}\n```",
+        0,
+    )
+    # ===== [TensorBoard] End SummaryWriter init =====
 
     # ---- 4.3: Load data and create tokenizer ----
     logger.info("Loading data from h5ad / pickle...")
@@ -904,6 +1070,7 @@ def run_cv_experiment(config_path: str):
             tokenizer=tokenizer,
             config=config,
             use_domain_adaptation=use_domain_adaptation,
+            tb_writer=tb_writer,                                           # ===== [TensorBoard] =====
         )
 
         fold_with_meta = {
@@ -951,6 +1118,28 @@ def run_cv_experiment(config_path: str):
     )
     pd.DataFrame([summary]).to_csv(summary_path, index=False)
     logger.info(f"Summary saved to: {summary_path}")
+
+    # ===== [TensorBoard] 记录超参对比 (hparams) 并关闭 writer =====
+    hparam_dict = {
+        "llm_lr": config["training_params"]["llm_lr"],
+        "mil_lr": config["training_params"]["mil_lr"],
+        "epochs": config["training_params"]["epochs"],
+        "freeze_llm": int(config["llm_params"]["freeze_llm"]),
+        "mil_hidden_dim": config["mil_params"]["mil_hidden_dim"],
+        "linformer_k": config["mil_params"].get("linformer_k", 128),
+        "moe_num_experts": config["mil_params"].get("moe_num_experts", 4),
+        "instance_dropout": config["mil_params"].get("instance_dropout_rate", 0.2),
+        "max_instances": config["mil_params"]["max_instances"],
+        "weight_decay": config["training_params"]["weight_decay"],
+        "clip_grad_norm": config["training_params"]["clip_grad_norm"],
+    }
+    metric_dict = {f"hparam/{k}": v for k, v in summary.items() if k != "model_name"}
+    if metric_dict:
+        tb_writer.add_hparams(hparam_dict, metric_dict)
+    tb_writer.close()
+    logger.info(f"[TensorBoard] Writer closed. Log dir: {tb_log_dir}")
+    # ===== [TensorBoard] End hparam logging =====
+
     logger.info("=" * 60)
     logger.info("CV Experiment finished successfully!")
     logger.info("=" * 60)
