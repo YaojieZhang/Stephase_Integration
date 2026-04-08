@@ -629,3 +629,4 @@ class SCMIL_STELLA_AttnMoE(nn.Module):
         trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
         frozen = total - trainable
         return {'total': total, 'trainable': trainable, 'frozen': frozen}
+
