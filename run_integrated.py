@@ -424,7 +424,7 @@ def train_and_evaluate_fold(
             compute_class_weight("balanced", classes=np.unique(train_label), y=train_label),
             dtype=torch.float,
         ).to(device)
-        disease_criterion = nn.CrossEntropyLoss(weight=class_weights)
+        disease_criterion = nn.CrossEntropyLoss(weight=class_weights, label_smoothing=0.1)
         early_stopping_mode = "max"  # maximize AUC
     else:
         disease_criterion = nn.MSELoss()
@@ -973,8 +973,8 @@ Examples:
     parser.add_argument(
         "--config",
         type=str,
-        default="./config_integration.json",
-        help="Path to the JSON configuration file (default: ./config_integration.json)",
+        default="/data/home/zhangyaojie/StePhase/config_integration.json",
+        help="Path to the JSON configuration file (default: /data/home/zhangyaojie/StePhase/config_integration.json)",
     )
     args = parser.parse_args()
 
