@@ -148,6 +148,10 @@ class SCMIL_STELLA_AttnMoE(nn.Module):
         # Maps the high-dimensional STELLA embeddings (512-d) to the MIL
         # working dimension (256-d), with LayerNorm for training stability.
         self.projector = nn.Sequential(
+            nn.Linear(self.stella_hidden_size, self.stella_hidden_size),
+            nn.LayerNorm(self.stella_hidden_size),
+            nn.GELU(),
+            nn.Dropout(0.1),
             nn.Linear(self.stella_hidden_size, self.mil_hidden_dim),
             nn.LayerNorm(self.mil_hidden_dim),
             nn.GELU(),
@@ -172,8 +176,8 @@ class SCMIL_STELLA_AttnMoE(nn.Module):
             self.linformer_k = mil_cfg.get('linformer_k', 128)
             # Project sequence dimension from up to max_instances to linformer_k
             # Using 10000 as the max seq_len to match original scPhase design
-            self.E_proj = nn.Linear(10000, self.linformer_k, bias=False)
-            self.F_proj = nn.Linear(10000, self.linformer_k, bias=False)
+            self.E_proj = nn.Linear(self.max_instances, self.linformer_k, bias=False)
+            self.F_proj = nn.Linear(self.max_instances, self.linformer_k, bias=False)
 
             self.norm1 = nn.LayerNorm(hidden_dim)
             self.norm2 = nn.LayerNorm(hidden_dim)
@@ -629,4 +633,3 @@ class SCMIL_STELLA_AttnMoE(nn.Module):
         trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
         frozen = total - trainable
         return {'total': total, 'trainable': trainable, 'frozen': frozen}
-
