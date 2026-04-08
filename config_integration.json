@@ -33,9 +33,7 @@
     "freeze_llm": true,
     "enable_gradient_checkpointing": true,
     "llm_max_seq_len": 4096,
-    "chunk_size": 8,
-    "do_normalize": false,
-    "do_qc": false
+    "chunk_size": 8
   },
 
   "mil_params": {
